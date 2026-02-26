@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+venv/
+.venv/
+
+# Packaging / build artifacts
+.eggs/
+*.egg-info/
+build/
+dist/
+
+# IDE
+.idea/
+
+# OS
+.DS_Store
