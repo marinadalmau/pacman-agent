@@ -23,4 +23,5 @@ To debug the agent you can run `capture.py` between the `baseline_team` and your
 1. `cd pacman-contest/src/contest/`
 2. `python capture.py -r baseline_team -b ../../../my_team.py`
 
+test
 
