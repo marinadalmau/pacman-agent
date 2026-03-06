@@ -140,7 +140,8 @@ class OffensiveAgent(PacmanAgent):
         # Step 3: Manhattan-distance buffer around visible enemy ghosts.
         self.safety_dist = 2
 
-        # Dynamic threshold tuning constants (we previously had self.return_threshold = 3 fixed)
+        # Dynamic threshold tuning constants (see _return_threshold below).
+        # These replace the old fixed self.return_threshold = 3.
         self.min_carry   = 1   # always return if carrying this many and close
         self.max_carry   = 6   # never carry more than this regardless of distance
 
@@ -207,7 +208,30 @@ class OffensiveAgent(PacmanAgent):
                 if action is not None:
                     return action
 
-        # Step 2: decide whether to return home with dynamic threshold
+        # Step 5: ENDGAME — sprint home if time is nearly up and we are carrying food.
+        # Conditions to trigger endgame sprint:
+        #   a) carrying any food AND moves left for us <= dist_home + buffer  →
+        #      we literally won't make it if we don't leave now
+        #   b) carrying food AND moves left for us <= endgame_window  →
+        #      close enough to the end that depositing > exploring
+        if carrying > 0:
+            dist_home    = min(self.get_maze_distance(my_pos, b) for b in self.home_boundary)
+            moves_left   = game_state.data.timeleft // 4   # our share of remaining moves
+            buffer       = 5                               # safety margin in steps
+            endgame_window = 60                            # always go home in last 60 of our moves
+
+            must_go_home = (moves_left <= dist_home + buffer) or \
+                           (moves_left <= endgame_window)
+
+            if must_go_home:
+                # Don't let danger avoidance block us if there's no time to go around
+                action = self.astar(game_state, my_pos, self.home_boundary, avoid=danger)
+                if action is None:
+                    action = self.astar(game_state, my_pos, self.home_boundary)
+                if action is not None:
+                    return action
+
+        # Step 2: decide whether to return home (now uses dynamic threshold)
         should_return = (carrying >= threshold) or \
                         (carrying > 0 and len(food_list) <= 2) or \
                         (carrying > 0 and ghost_threat)
