@@ -137,18 +137,49 @@ class OffensiveAgent(PacmanAgent):
     def register_initial_state(self, game_state):
         super().register_initial_state(game_state)
 
-        # Return home after collecting this many pellets (tune as needed).
-        self.return_threshold = 3
-
         # Step 3: Manhattan-distance buffer around visible enemy ghosts.
         self.safety_dist = 2
+
+        # Dynamic threshold tuning constants (we previously had self.return_threshold = 3 fixed)
+        self.min_carry   = 1   # always return if carrying this many and close
+        self.max_carry   = 6   # never carry more than this regardless of distance
+
+    def _return_threshold(self, game_state, my_pos):
+        """
+        Dynamic carry threshold based on distance to the home boundary.
+
+        Intuition
+        ---------
+        If we are already near the boundary, it costs little to deposit food,
+        so we should return even with just 1–2 pellets.
+        If we are deep in enemy territory, the trip home is expensive, so we
+        should fill up more before making the journey.
+
+        Formula
+        -------
+        dist_home  = maze distance to the nearest boundary cell
+        max_dist   = width of the enemy half ≈ walls.width // 2
+
+        threshold = min_carry + round((dist_home / max_dist) * (max_carry - min_carry))
+
+        This linearly scales the threshold from min_carry (at the boundary)
+        to max_carry (at the far edge of the enemy side).
+        """
+        dist_home = min(self.get_maze_distance(my_pos, b) for b in self.home_boundary)
+        max_dist  = game_state.get_walls().width // 2          # approx enemy half-width
+        ratio     = min(dist_home / max_dist, 1.0)             # clamp to [0, 1]
+        threshold = self.min_carry + round(ratio * (self.max_carry - self.min_carry))
+        return threshold
 
     def choose_action(self, game_state):
         my_state  = game_state.get_agent_state(self.index)
         my_pos    = my_state.get_position()
         carrying  = my_state.num_carrying
         food_list = self.get_food(game_state).as_list()
-        capsules  = self.get_capsules(game_state)  # Step 4: capsule targets
+        capsules  = self.get_capsules(game_state)
+
+        # Compute dynamic threshold for this position
+        threshold = self._return_threshold(game_state, my_pos)
 
         # Step 3: cells to avoid this turn
         visible_ghosts = self._visible_ghosts(game_state)
@@ -159,13 +190,11 @@ class OffensiveAgent(PacmanAgent):
         )
 
         # Step 4a: if ghosts are scared, drop all danger avoidance and eat freely.
-        # Scared ghosts cannot harm us — treating them as dangerous wastes the window.
         if self._scared_ghosts(game_state):
             danger = set()
             ghost_threat = False
 
-        # Step 4b: if a ghost is close AND a capsule is reachable before the ghost,
-        # go for the capsule first so we can neutralise the threat and eat safely.
+        # Step 4b: go for capsule if it's closer than the threatening ghost.
         if ghost_threat and capsules:
             nearest_ghost_dist = min(
                 self.get_maze_distance(my_pos, g.get_position()) for g in visible_ghosts
@@ -178,8 +207,8 @@ class OffensiveAgent(PacmanAgent):
                 if action is not None:
                     return action
 
-        # Step 2: decide whether to return home
-        should_return = (carrying >= self.return_threshold) or \
+        # Step 2: decide whether to return home with dynamic threshold
+        should_return = (carrying >= threshold) or \
                         (carrying > 0 and len(food_list) <= 2) or \
                         (carrying > 0 and ghost_threat)
 
