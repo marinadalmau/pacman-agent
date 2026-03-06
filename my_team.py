@@ -19,21 +19,7 @@ from contest.util import nearest_point
 #################
 
 def create_team(first_index, second_index, is_red,
-                first='OffensiveReflexAgent', second='DefensiveReflexAgent', num_training=0):
-    """
-    This function should return a list of two agents that will form the
-    team, initialized using firstIndex and secondIndex as their agent
-    index numbers.  isRed is True if the red team is being created, and
-    will be False if the blue team is being created.
-
-    As a potentially helpful development aid, this function can take
-    additional string-valued keyword arguments ("first" and "second" are
-    such arguments in the case of this function), which will come from
-    the --red_opts and --blue_opts command-line arguments to capture.py.
-    For the nightly contest, however, your team will be created without
-    any extra arguments, so you should make sure that the default
-    behavior is what you want for the nightly contest.
-    """
+                first='OffensiveAgent', second='DefensiveAgent', num_training=0):
     return [eval(first)(first_index), eval(second)(second_index)]
 
 
@@ -41,143 +27,338 @@ def create_team(first_index, second_index, is_red,
 # Agents #
 ##########
 
-class ReflexCaptureAgent(CaptureAgent):
-    """
-    A base class for reflex agents that choose score-maximizing actions
-    """
+# ---------------------------------------------------------------------------
+# BASE AGENT
+# Shared utilities for both OffensiveAgent and DefensiveAgent:
+#   - Precomputes home_boundary (midline cells on our side)
+#   - Provides A* search used by both agents
+# ---------------------------------------------------------------------------
 
-    def __init__(self, index, time_for_computing=.1):
-        super().__init__(index, time_for_computing)
-        self.start = None
+class PacmanAgent(CaptureAgent):
+    """Base class: shared A* search and home-boundary precomputation."""
 
     def register_initial_state(self, game_state):
         self.start = game_state.get_agent_position(self.index)
         CaptureAgent.register_initial_state(self, game_state)
+        # CaptureAgent.register_initial_state precomputes all pairwise maze
+        # distances so get_maze_distance() is O(1) at action time.
+
+        walls = game_state.get_walls()
+        mid = walls.width // 2
+        # Red owns x < mid, blue owns x >= mid.
+        # home_boundary = non-wall cells on the column closest to the enemy.
+        home_x = mid - 1 if self.red else mid
+        self.home_boundary = [
+            (home_x, y) for y in range(1, walls.height - 1)
+            if not walls[home_x][y]
+        ]
+
+    # -----------------------------------------------------------------------
+    # A* SEARCH  (Lecture 5 — Heuristic Search)
+    #
+    # f(n) = g(n) + h(n)
+    #   g(n) = uniform cost (1 per step)
+    #   h(n) = min maze_distance(n, goal) for goal in goals
+    #          Admissible because maze_distance == true shortest-path cost
+    #          (delete-relaxation from Lecture 5).
+    #
+    # Parameters
+    # ----------
+    # start : (x, y) starting position
+    # goals : iterable of target (x, y) positions (any one counts)
+    # avoid : set of (x, y) cells treated as impassable (ghost danger zones)
+    #
+    # Returns the first Directions action on the optimal path, or None.
+    # -----------------------------------------------------------------------
+    def astar(self, game_state, start, goals, avoid=None):
+        if avoid is None:
+            avoid = set()
+        walls = game_state.get_walls()
+        goals = set(goals)
+        if not goals:
+            return None
+
+        def h(pos):
+            return min(self.get_maze_distance(pos, g) for g in goals)
+
+        frontier = util.PriorityQueue()
+        frontier.push((start, None, 0), h(start))
+        best_g = {start: 0}
+
+        moves = [
+            (Directions.NORTH, (0,  1)),
+            (Directions.SOUTH, (0, -1)),
+            (Directions.EAST,  (1,  0)),
+            (Directions.WEST,  (-1, 0)),
+        ]
+
+        while not frontier.is_empty():
+            pos, first_action, g = frontier.pop()
+
+            if pos in goals:
+                return first_action if first_action is not None else Directions.STOP
+
+            if g > best_g.get(pos, float('inf')):
+                continue
+
+            for action, (dx, dy) in moves:
+                nx = int(pos[0] + dx)
+                ny = int(pos[1] + dy)
+                next_pos = (nx, ny)
+
+                if walls[nx][ny] or next_pos in avoid:
+                    continue
+
+                new_g = g + 1
+                if new_g < best_g.get(next_pos, float('inf')):
+                    best_g[next_pos] = new_g
+                    f = new_g + h(next_pos)
+                    next_first = action if first_action is None else first_action
+                    frontier.push((next_pos, next_first, new_g), f)
+
+        return None
+
+
+# ---------------------------------------------------------------------------
+# OFFENSIVE AGENT  (Steps 1–3)
+#
+# Classical planning model (Lecture 5, STRIPS):
+#   F  = grid positions
+#   s0 = current position,  G = food positions,  A = {N, S, E, W}
+#   Uses A* with h = min maze_distance to food (admissible).
+#
+# Extensions:
+#   Step 2 — return home after carrying >= threshold pellets (score them)
+#   Step 3 — treat cells near visible non-scared ghosts as impassable in A*
+# ---------------------------------------------------------------------------
+
+class OffensiveAgent(PacmanAgent):
+
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+
+        # Return home after collecting this many pellets (tune as needed).
+        self.return_threshold = 3
+
+        # Step 3: Manhattan-distance buffer around visible enemy ghosts.
+        self.safety_dist = 2
 
     def choose_action(self, game_state):
+        my_state  = game_state.get_agent_state(self.index)
+        my_pos    = my_state.get_position()
+        carrying  = my_state.num_carrying
+        food_list = self.get_food(game_state).as_list()
+
+        # Step 3: cells to avoid this turn
+        danger = self._danger_positions(game_state)
+        ghost_threat = any(
+            self.get_maze_distance(my_pos, g.get_position()) <= 5
+            for g in self._visible_ghosts(game_state)
+        )
+
+        # Step 2: decide whether to return home
+        should_return = (carrying >= self.return_threshold) or \
+                        (carrying > 0 and len(food_list) <= 2) or \
+                        (carrying > 0 and ghost_threat)
+
+        if should_return:
+            action = self.astar(game_state, my_pos, self.home_boundary, avoid=danger)
+            if action is None:
+                action = self.astar(game_state, my_pos, self.home_boundary)
+            if action is not None:
+                return action
+
+        # Step 1: navigate to food, avoiding danger zone
+        if not food_list:
+            return random.choice(game_state.get_legal_actions(self.index))
+
+        action = self.astar(game_state, my_pos, food_list, avoid=danger)
+        if action is None:
+            if carrying > 0:
+                action = self.astar(game_state, my_pos, self.home_boundary, avoid=danger) \
+                      or self.astar(game_state, my_pos, self.home_boundary)
+            else:
+                action = self.astar(game_state, my_pos, food_list)
+
+        return action or random.choice(game_state.get_legal_actions(self.index))
+
+    def _visible_ghosts(self, game_state):
+        """Visible, non-scared enemy ghosts."""
+        ghosts = []
+        for idx in self.get_opponents(game_state):
+            e = game_state.get_agent_state(idx)
+            if not e.is_pacman and e.scared_timer == 0 and e.get_position() is not None:
+                ghosts.append(e)
+        return ghosts
+
+    def _danger_positions(self, game_state):
+        """Diamond of cells within safety_dist of each visible ghost."""
+        danger = set()
+        walls  = game_state.get_walls()
+        for ghost in self._visible_ghosts(game_state):
+            gx, gy = int(ghost.get_position()[0]), int(ghost.get_position()[1])
+            for dx in range(-self.safety_dist, self.safety_dist + 1):
+                for dy in range(-self.safety_dist, self.safety_dist + 1):
+                    if abs(dx) + abs(dy) <= self.safety_dist:
+                        nx, ny = gx + dx, gy + dy
+                        if 0 <= nx < walls.width and 0 <= ny < walls.height:
+                            if not walls[nx][ny]:
+                                danger.add((nx, ny))
+        return danger
+
+
+# ---------------------------------------------------------------------------
+# DEFENSIVE AGENT  (Step 4)
+#
+# Belief tracking for invisible enemies (Lecture 6 — Partially Observable
+# Environments / MDPs with imperfect information):
+#
+#   Belief  b(s) = P(enemy is at grid cell s)
+#
+#   Predict step — transition model (enemy takes one step per turn):
+#     b̂(s') = Σ_s  P(s' | s) · b(s)
+#     P(s' | s) = 1 / |neighbours(s)|   (uniform random move + stay)
+#
+#   Observe step — Bayes' rule with noisy sonar:
+#     b_{t+1}(s) ∝ P(obs | s) · b̂(s)
+#     game_state.get_agent_distances() → noisy Manhattan distance
+#     P(obs | s) = get_distance_prob(manhattan(me, s), obs)
+#               = 1/13  if |obs − true_dist| ≤ 6,  else 0
+#
+#   Direct observation (enemy within SIGHT_RANGE = 5):
+#     b_{t+1}(s) = point mass at the exact observed position
+#
+# Action selection:
+#   - If invader is visible       → A* chase to exact position
+#   - If invader is invisible     → A* chase to most-likely cell (arg_max b)
+#   - No invaders                 → A* patrol along home boundary
+# ---------------------------------------------------------------------------
+
+class DefensiveAgent(PacmanAgent):
+
+    def register_initial_state(self, game_state):
+        super().register_initial_state(game_state)
+        self.walls = game_state.get_walls()
+
+        # Initialize beliefs as a point mass at each opponent's start position.
+        # util.Counter is a dict subclass with normalize() and arg_max().
+        self.beliefs = {}
+        for opp_idx in self.get_opponents(game_state):
+            b = util.Counter()
+            b[game_state.get_initial_agent_position(opp_idx)] = 1.0
+            self.beliefs[opp_idx] = b
+
+        # Patrol waypoints: upper and lower quarters of the home boundary column.
+        # The agent cycles between them so it never stands still while guarding.
+        n = len(self.home_boundary)
+        self.patrol_points = [
+            self.home_boundary[n // 4],
+            self.home_boundary[3 * n // 4],
+        ]
+        self.patrol_idx = 0
+
+    # ------------------------------------------------------------------
+    # Belief update: predict then observe (called at the start of each turn)
+    # ------------------------------------------------------------------
+
+    def _predict(self):
+        """Transition update: spread probability mass to adjacent cells."""
+        walls = self.walls
+        step_offsets = [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)]
+
+        for opp_idx, belief in self.beliefs.items():
+            new_belief = util.Counter()
+            for pos, prob in belief.items():
+                if prob == 0:
+                    continue
+                x, y = int(pos[0]), int(pos[1])
+                neighbors = [
+                    (x + dx, y + dy)
+                    for dx, dy in step_offsets
+                    if 0 <= x + dx < walls.width
+                    and 0 <= y + dy < walls.height
+                    and not walls[x + dx][y + dy]
+                ]
+                share = prob / len(neighbors)
+                for nb in neighbors:
+                    new_belief[nb] += share
+            new_belief.normalize()
+            self.beliefs[opp_idx] = new_belief
+
+    def _observe(self, game_state):
         """
-        Picks among the actions with the highest Q(s,a).
+        Bayesian update using the noisy sonar readings.
+
+        For each opponent:
+          - If directly visible  → collapse belief to exact position (point mass).
+          - Otherwise            → weight each candidate position by the sonar
+                                   likelihood and renormalize.
         """
-        actions = game_state.get_legal_actions(self.index)
+        my_pos     = game_state.get_agent_position(self.index)
+        noisy_dists = game_state.get_agent_distances()
 
-        # You can profile your evaluation time by uncommenting these lines
-        # start = time.time()
-        values = [self.evaluate(game_state, a) for a in actions]
-        # print 'eval time for agent %d: %.4f' % (self.index, time.time() - start)
+        for opp_idx in self.get_opponents(game_state):
+            opp_state  = game_state.get_agent_state(opp_idx)
+            exact_pos  = opp_state.get_position()
 
-        max_value = max(values)
-        best_actions = [a for a, v in zip(actions, values) if v == max_value]
+            if exact_pos is not None:
+                # Direct observation: collapse to point mass
+                b = util.Counter()
+                b[exact_pos] = 1.0
+                self.beliefs[opp_idx] = b
+            else:
+                noisy = noisy_dists[opp_idx]
+                new_belief = util.Counter()
+                for pos, prior in self.beliefs[opp_idx].items():
+                    if prior == 0:
+                        continue
+                    true_dist  = util.manhattan_distance(my_pos, pos)
+                    likelihood = game_state.get_distance_prob(true_dist, noisy)
+                    new_belief[pos] = prior * likelihood
 
-        food_left = len(self.get_food(game_state).as_list())
+                if new_belief.total_count() > 0:
+                    new_belief.normalize()
+                    self.beliefs[opp_idx] = new_belief
+                # else: keep old belief (numerical edge case — all weights zero)
 
-        if food_left <= 2:
-            best_dist = 9999
-            best_action = None
-            for action in actions:
-                successor = self.get_successor(game_state, action)
-                pos2 = successor.get_agent_position(self.index)
-                dist = self.get_maze_distance(self.start, pos2)
-                if dist < best_dist:
-                    best_action = action
-                    best_dist = dist
-            return best_action
+    # ------------------------------------------------------------------
+    # Action selection
+    # ------------------------------------------------------------------
 
-        return random.choice(best_actions)
+    def choose_action(self, game_state):
+        # Update belief state every turn
+        self._predict()
+        self._observe(game_state)
 
-    def get_successor(self, game_state, action):
-        """
-        Finds the next successor which is a grid position (location tuple).
-        """
-        successor = game_state.generate_successor(self.index, action)
-        pos = successor.get_agent_state(self.index).get_position()
-        if pos != nearest_point(pos):
-            # Only half a grid position was covered
-            return successor.generate_successor(self.index, action)
-        else:
-            return successor
+        my_state = game_state.get_agent_state(self.index)
+        my_pos   = my_state.get_position()
 
-    def evaluate(self, game_state, action):
-        """
-        Computes a linear combination of features and feature weights
-        """
-        features = self.get_features(game_state, action)
-        weights = self.get_weights(game_state, action)
-        return features * weights
+        # Don't leave our side — if we accidentally crossed, come back.
+        if my_state.is_pacman:
+            action = self.astar(game_state, my_pos, self.home_boundary)
+            return action or random.choice(game_state.get_legal_actions(self.index))
 
-    def get_features(self, game_state, action):
-        """
-        Returns a counter of features for the state
-        """
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-        features['successor_score'] = self.get_score(successor)
-        return features
+        # Gather invader targets (visible = exact pos; invisible = most-likely pos)
+        targets = []
+        for opp_idx in self.get_opponents(game_state):
+            opp = game_state.get_agent_state(opp_idx)
+            if not opp.is_pacman:
+                continue  # still on enemy side, not our problem yet
+            if opp.get_position() is not None:
+                targets.append(opp.get_position())
+            else:
+                targets.append(self.beliefs[opp_idx].arg_max())
 
-    def get_weights(self, game_state, action):
-        """
-        Normally, weights do not depend on the game state.  They can be either
-        a counter or a dictionary.
-        """
-        return {'successor_score': 1.0}
+        if targets:
+            action = self.astar(game_state, my_pos, targets)
+            if action:
+                return action
 
-
-class OffensiveReflexAgent(ReflexCaptureAgent):
-    """
-  A reflex agent that seeks food. This is an agent
-  we give you to get an idea of what an offensive agent might look like,
-  but it is by no means the best or only way to build an offensive agent.
-  """
-
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-        food_list = self.get_food(successor).as_list()
-        features['successor_score'] = -len(food_list)  # self.getScore(successor)
-
-        # Compute distance to the nearest food
-
-        if len(food_list) > 0:  # This should always be True,  but better safe than sorry
-            my_pos = successor.get_agent_state(self.index).get_position()
-            min_distance = min([self.get_maze_distance(my_pos, food) for food in food_list])
-            features['distance_to_food'] = min_distance
-        return features
-
-    def get_weights(self, game_state, action):
-        return {'successor_score': 100, 'distance_to_food': -1}
-
-
-class DefensiveReflexAgent(ReflexCaptureAgent):
-    """
-    A reflex agent that keeps its side Pacman-free. Again,
-    this is to give you an idea of what a defensive agent
-    could be like.  It is not the best or only way to make
-    such an agent.
-    """
-
-    def get_features(self, game_state, action):
-        features = util.Counter()
-        successor = self.get_successor(game_state, action)
-
-        my_state = successor.get_agent_state(self.index)
-        my_pos = my_state.get_position()
-
-        # Computes whether we're on defense (1) or offense (0)
-        features['on_defense'] = 1
-        if my_state.is_pacman: features['on_defense'] = 0
-
-        # Computes distance to invaders we can see
-        enemies = [successor.get_agent_state(i) for i in self.get_opponents(successor)]
-        invaders = [a for a in enemies if a.is_pacman and a.get_position() is not None]
-        features['num_invaders'] = len(invaders)
-        if len(invaders) > 0:
-            dists = [self.get_maze_distance(my_pos, a.get_position()) for a in invaders]
-            features['invader_distance'] = min(dists)
-
-        if action == Directions.STOP: features['stop'] = 1
-        rev = Directions.REVERSE[game_state.get_agent_state(self.index).configuration.direction]
-        if action == rev: features['reverse'] = 1
-
-        return features
-
-    def get_weights(self, game_state, action):
-        return {'num_invaders': -1000, 'on_defense': 100, 'invader_distance': -10, 'stop': -100, 'reverse': -2}
+        # No invaders: cycle between two patrol waypoints along the boundary.
+        # When the current waypoint is reached, advance to the next one.
+        target = self.patrol_points[self.patrol_idx]
+        if my_pos == target:
+            self.patrol_idx = (self.patrol_idx + 1) % len(self.patrol_points)
+            target = self.patrol_points[self.patrol_idx]
+        action = self.astar(game_state, my_pos, [target])
+        return action or random.choice(game_state.get_legal_actions(self.index))
