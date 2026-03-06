@@ -148,13 +148,35 @@ class OffensiveAgent(PacmanAgent):
         my_pos    = my_state.get_position()
         carrying  = my_state.num_carrying
         food_list = self.get_food(game_state).as_list()
+        capsules  = self.get_capsules(game_state)  # Step 4: capsule targets
 
         # Step 3: cells to avoid this turn
+        visible_ghosts = self._visible_ghosts(game_state)
         danger = self._danger_positions(game_state)
         ghost_threat = any(
             self.get_maze_distance(my_pos, g.get_position()) <= 5
-            for g in self._visible_ghosts(game_state)
+            for g in visible_ghosts
         )
+
+        # Step 4a: if ghosts are scared, drop all danger avoidance and eat freely.
+        # Scared ghosts cannot harm us — treating them as dangerous wastes the window.
+        if self._scared_ghosts(game_state):
+            danger = set()
+            ghost_threat = False
+
+        # Step 4b: if a ghost is close AND a capsule is reachable before the ghost,
+        # go for the capsule first so we can neutralise the threat and eat safely.
+        if ghost_threat and capsules:
+            nearest_ghost_dist = min(
+                self.get_maze_distance(my_pos, g.get_position()) for g in visible_ghosts
+            )
+            nearest_capsule_dist = min(
+                self.get_maze_distance(my_pos, c) for c in capsules
+            )
+            if nearest_capsule_dist < nearest_ghost_dist:
+                action = self.astar(game_state, my_pos, capsules, avoid=danger)
+                if action is not None:
+                    return action
 
         # Step 2: decide whether to return home
         should_return = (carrying >= self.return_threshold) or \
@@ -188,6 +210,15 @@ class OffensiveAgent(PacmanAgent):
         for idx in self.get_opponents(game_state):
             e = game_state.get_agent_state(idx)
             if not e.is_pacman and e.scared_timer == 0 and e.get_position() is not None:
+                ghosts.append(e)
+        return ghosts
+
+    def _scared_ghosts(self, game_state):
+        """Visible enemy ghosts that are currently scared (safe to ignore)."""
+        ghosts = []
+        for idx in self.get_opponents(game_state):
+            e = game_state.get_agent_state(idx)
+            if not e.is_pacman and e.scared_timer > 0 and e.get_position() is not None:
                 ghosts.append(e)
         return ghosts
 
