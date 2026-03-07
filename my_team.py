@@ -208,10 +208,10 @@ class OffensiveAgent(PacmanAgent):
                 if action is not None:
                     return action
 
-        # Step 5: ENDGAME — sprint home if time is nearly up and we are carrying food.
-        # Conditions to trigger endgame sprint:
+        # Step 5: ENDGAME — sprint home if time is finishing and we are carrying food.
+        # Conditions to start sprint:
         #   a) carrying any food AND moves left for us <= dist_home + buffer  →
-        #      we literally won't make it if we don't leave now
+        #      we won't make it if we don't leave now
         #   b) carrying food AND moves left for us <= endgame_window  →
         #      close enough to the end that depositing > exploring
         if carrying > 0:
@@ -332,14 +332,9 @@ class DefensiveAgent(PacmanAgent):
             b[game_state.get_initial_agent_position(opp_idx)] = 1.0
             self.beliefs[opp_idx] = b
 
-        # Patrol waypoints: upper and lower quarters of the home boundary column.
-        # The agent cycles between them so it never stands still while guarding.
+        # Smarter patrol, target is recomputed dynamically each turn based on which food cluster on our side is largest
         n = len(self.home_boundary)
-        self.patrol_points = [
-            self.home_boundary[n // 4],
-            self.home_boundary[3 * n // 4],
-        ]
-        self.patrol_idx = 0
+        self.patrol_fallback = self.home_boundary[n // 2]
 
     # ------------------------------------------------------------------
     # Belief update: predict then observe (called at the start of each turn)
@@ -438,11 +433,70 @@ class DefensiveAgent(PacmanAgent):
             if action:
                 return action
 
-        # No invaders: cycle between two patrol waypoints along the boundary.
-        # When the current waypoint is reached, advance to the next one.
-        target = self.patrol_points[self.patrol_idx]
-        if my_pos == target:
-            self.patrol_idx = (self.patrol_idx + 1) % len(self.patrol_points)
-            target = self.patrol_points[self.patrol_idx]
+        # No invaders: move to the boundary cell that best covers our largest
+        # remaining food cluster (recomputed every turn as food gets eaten).
+        target = self._best_patrol_target(game_state, my_pos)
         action = self.astar(game_state, my_pos, [target])
         return action or random.choice(game_state.get_legal_actions(self.index))
+
+    def _best_patrol_target(self, game_state, my_pos):
+        """
+        Find the home-boundary cell that is closest to the largest food cluster
+        on our side.
+
+        Algorithm
+        ---------
+        1. Get all food remaining on our side (get_food_you_are_defending).
+        2. Cluster it with a simple greedy approach: repeatedly pick the
+           unassigned food cell furthest from all existing cluster centres,
+           seed a new cluster there, then assign every remaining cell to its
+           nearest centre.  We use k=2 clusters so the patrol covers both
+           halves of the map without needing many iterations.
+        3. Return the boundary cell with the smallest maze distance to the
+           centroid of the largest cluster.  This is the entry point an
+           attacker is most likely to aim for, so standing there intercepts
+           the most dangerous threat.
+
+        Falls back to self.patrol_fallback (boundary midpoint) if our side
+        has no food left (shouldn't happen before game end, but be safe).
+        """
+        food_list = self.get_food_you_are_defending(game_state).as_list()
+        if not food_list:
+            return self.patrol_fallback
+
+        # ---- k-means-style clustering with k=2 -------------------------
+        k = min(2, len(food_list))
+
+        # Seed: first centre = food closest to top of map (highest y),
+        #       second centre = food closest to bottom (lowest y).
+        sorted_by_y = sorted(food_list, key=lambda f: f[1])
+        centres = [sorted_by_y[-1]]                        # top seed
+        if k == 2:
+            centres.append(sorted_by_y[0])                # bottom seed
+
+        # One pass of assignment (enough for patrol purposes — full iteration
+        # is unnecessary overhead given the 1-second time limit).
+        clusters = {i: [] for i in range(k)}
+        for food in food_list:
+            nearest_c = min(range(k),
+                            key=lambda i: util.manhattan_distance(food, centres[i]))
+            clusters[nearest_c].append(food)
+
+        # Pick the largest cluster
+        largest = max(clusters.values(), key=len)
+        if not largest:
+            return self.patrol_fallback
+
+        # Centroid of the largest cluster (averaged coordinates).
+        # The centroid itself may fall on a wall, so we snap it to the nearest
+        # actual food cell — that position is guaranteed to be on the grid.
+        cx = sum(f[0] for f in largest) / len(largest)
+        cy = sum(f[1] for f in largest) / len(largest)
+        anchor = min(largest, key=lambda f: (f[0] - cx) ** 2 + (f[1] - cy) ** 2)
+
+        # Boundary cell with smallest maze distance to the anchor food cell
+        best = min(
+            self.home_boundary,
+            key=lambda b: self.get_maze_distance(b, anchor)
+        )
+        return best
