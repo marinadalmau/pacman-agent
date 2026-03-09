@@ -427,4 +427,4 @@ class DefensiveAgent(PacmanAgent):
         # No invaders yet — patrol the boundary near our biggest food cluster
         target = self._best_patrol_target(game_state, my_pos)
         action = self.astar(game_state, my_pos, [target])
-        return action or random.choice(game_state.get_legal_actions(self.index))
+        return action or random.choice(game_state.get_legal_actions(self.index)) 

@@ -10,5 +10,5 @@
 
 **Team members:**
 
-* Student 1's Student number - Mireia Louzan - Student email - Student Github id
+* Student 1's u269261 - Mireia Louzan - Student email - Student Github id
 * Student 2's Student number - Marina Dalmau - Student email - Student Github id
