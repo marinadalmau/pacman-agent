@@ -10,5 +10,5 @@
 
 **Team members:**
 
-* Student 1's u269261 - Mireia Louzan - Student email - Student Github id
-* Student 2's Student number - Marina Dalmau - Student email - Student Github id
+* u269261 - Mireia Louzan - mireia.louzan01@estudiant.upf.edu - https://github.com/marinadalmau
+* u269650 - Marina Dalmau - marina.dalmau01@estudiant.upf.edu - https://github.com/mlouzan
